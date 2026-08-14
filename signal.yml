@@ -1,0 +1,29 @@
+name: Gold SMC Signal
+
+on:
+  schedule:
+    - cron: '0 * * * *'   # รันทุก ๆ 1 ชั่วโมง (ทุกต้นชั่วโมง UTC)
+  workflow_dispatch:       # เพิ่มปุ่ม Run เองได้
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+      - name: Run Signal Bot
+        env:
+          LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
+          LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+        run: python signal_bot.py
+      - name: Commit and push pending orders (state)
+        run: |
+          git config user.name "github-actions"
+          git config user.email "actions@github.com"
+          git add pending_orders.json
+          git diff --staged --quiet || (git commit -m "Update pending orders [skip ci]" && git push)
