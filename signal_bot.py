@@ -54,7 +54,34 @@ def has_nearby(orders, entry, pip_dist=5.0):
             return True
     return False
 
+def send_morning_status():
+    """ส่งข้อความแจ้งเตือนตอน 7 โมงเช้าเวลาไทย ว่าระบบยังทำงานอยู่"""
+    now = datetime.now(timezone.utc)
+    now_thai = now + timedelta(hours=7)  # แปลงเป็นเวลาไทย (UTC+7)
+    
+    msg = (f"☀️ ระบบ Gold SMC Signal ทำงานปกติ\n"
+           f"วันที่: {now_thai.strftime('%d/%m/%Y')}\n"
+           f"เวลา (ไทย): {now_thai.strftime('%H:%M')} น.\n"
+           f"สถานะ: กำลังติดตามตลาดทองคำ\n"
+           f"กลยุทธ์: SMC (Order Block + FVG)\n"
+           f"รอบการทำงาน: ทุก 1 ชั่วโมง\n"
+           f"--------------------------------\n"
+           f"จะแจ้งเตือนเมื่อพบสัญญาณที่ผ่านเงื่อนไข")
+    
+    send_line_message(msg)
+    print(f"✅ ส่งข้อความแจ้งเตือนตอนเช้าแล้ว (เวลาไทย: {now_thai.strftime('%H:%M')} น.)")
+
 def main():
+    now = datetime.now(timezone.utc)
+    now_thai = now + timedelta(hours=7)
+    
+    print(f"=== ระบบเริ่มทำงาน === เวลาไทย: {now_thai.strftime('%d/%m/%Y %H:%M:%S')} น.")
+    
+    # ====== เช็คว่าตอนนี้เป็น 7 โมงเช้าเวลาไทยหรือไม่ ======
+    if now_thai.hour == 7 and now_thai.minute < 60:
+        print("🕖 ส่งข้อความแจ้งเตือนตอนเช้า...")
+        send_morning_status()
+    
     print("กำลังดึงข้อมูลจาก yfinance...")
     df_h1 = yf.download(SYMBOL, period="5d", interval=TIMEFRAME_H1)
     df_h4 = yf.download(SYMBOL, period="20d", interval=TIMEFRAME_H4)
@@ -86,9 +113,8 @@ def main():
         return
     
     pending = load_state()
-    # ====== แก้ Deprecation Warning ======
-    now = datetime.now(timezone.utc)
-    pending = clean_expired(pending, now)
+    now_utc = datetime.now(timezone.utc)
+    pending = clean_expired(pending, now_utc)
     
     new_order = None
     swings_high, swings_low = find_swings(df_h1)
@@ -116,13 +142,11 @@ def main():
     elif regime == "HIGH_VOL":
         print("🔍 กำลังหา FVG ในช่วง High Volatility...")
         
-        # หา FVG ทั้งสองทิศทาง
         bullish_fvg = find_fvg(df_h1, direction='bullish')
         bearish_fvg = find_fvg(df_h1, direction='bearish')
         
         current_price = df_h1['Close'].iloc[-1]
         
-        # ====== ปรับระยะห่างให้กว้างขึ้น (จาก 20 เป็น 30) ======
         for top, bottom, idx in reversed(bullish_fvg):
             if bottom < current_price and (current_price - bottom) < 30.0:
                 entry = bottom
@@ -141,7 +165,6 @@ def main():
                     break
     
     if new_order:
-        # ====== แก้: เช็ค is_choppy ก่อน แต่สำหรับ HIGH_VOL ไม่ต้องเช็ค is_choppy ======
         if regime != "HIGH_VOL" and is_choppy(df_h1):
             print("ตลาดเงียบ - ข้าม")
             return
@@ -151,7 +174,7 @@ def main():
             return
         
         if not has_nearby(pending, new_order['entry']):
-            order_id = f"GOLD_{new_order['type']}_{now.strftime('%Y%m%d_%H%M')}"
+            order_id = f"GOLD_{new_order['type']}_{now_utc.strftime('%Y%m%d_%H%M')}"
             order = {
                 "id": order_id,
                 "symbol": "XAUUSD",
@@ -159,7 +182,7 @@ def main():
                 "entry": round(new_order['entry'], 2),
                 "sl": round(new_order['sl'], 2),
                 "tp": round(new_order['tp'], 2),
-                "created_time": now.isoformat(),
+                "created_time": now_utc.isoformat(),
                 "expiry_hours": MAX_AGE_HOURS,
                 "status": "active"
             }
@@ -185,7 +208,7 @@ def main():
     else:
         print("ไม่พบสัญญาณที่ผ่านเงื่อนไข")
     
-    pending = clean_expired(pending, now)
+    pending = clean_expired(pending, now_utc)
     save_state(pending)
 
 if __name__ == "__main__":

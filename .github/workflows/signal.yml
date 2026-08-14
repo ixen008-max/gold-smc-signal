@@ -2,7 +2,10 @@ name: Gold SMC Signal
 
 on:
   schedule:
+    # รันทุก ๆ 1 ชั่วโมง (ทุกต้นชั่วโมง UTC)
     - cron: '0 * * * *'
+    # รันพิเศษตอน 7 โมงเช้าเวลาไทย (00:00 UTC) เพื่อส่งข้อความแจ้งเตือนว่าระบบทำงาน
+    - cron: '0 0 * * *'
   workflow_dispatch:
 
 jobs:
