@@ -1,0 +1,13 @@
+[
+  {
+    "id": "GOLD_BUY_LIMIT_20260814_1351",
+    "symbol": "XAUUSD",
+    "type": "BUY_LIMIT",
+    "entry": 4426.0,
+    "sl": 4421.0,
+    "tp": 4429.9,
+    "created_time": "2026-08-14T13:51:43.043137+00:00",
+    "expiry_hours": 12,
+    "status": "active"
+  }
+]
