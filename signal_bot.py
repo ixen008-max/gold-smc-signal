@@ -1,5 +1,4 @@
 import os, json, requests
-import yfinance as yf
 import pandas as pd
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
@@ -9,12 +8,12 @@ load_dotenv()
 
 from market_regime import detect_market_regime
 from smc_strategy import find_smc_setup, calculate_atr
-from filters import is_near_news, mtf_confirm, is_trading_session
+from filters import is_near_news, mtf_confirm   # ลบ is_trading_session ออกแล้ว
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ['LINE_CHANNEL_ACCESS_TOKEN']
 LINE_USER_ID = os.environ['LINE_USER_ID']
+TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY')
 
-SYMBOL = "GC=F"
 TIMEFRAME_H1 = "1h"
 TIMEFRAME_H4 = "4h"
 STATE_FILE = "pending_orders.json"
@@ -89,7 +88,7 @@ def calculate_rr(order):
     return reward / risk
 
 def analyze_with_chatgpt(setup, df_h1):
-    """เรียก ChatGPT เพื่อยืนยันสัญญาณ (ถ้ามี API Key)"""
+    """เรียก ChatGPT เพื่อวิเคราะห์สัญญาณ โดยเน้น Price Action"""
     try:
         import openai
     except ImportError:
@@ -100,11 +99,13 @@ def analyze_with_chatgpt(setup, df_h1):
         return None
     openai.api_key = api_key
 
-    recent_data = df_h1.tail(5)[['Open','High','Low','Close']].to_string()
-    prompt = f"""
-    วิเคราะห์สัญญาณเทรดทองคำ (XAUUSD) ด้วยกลยุทธ์ Smart Money Concept
+    # ใช้ข้อมูล 10 แท่งล่าสุดเพื่อให้เห็น Price Action ชัดขึ้น
+    recent_data = df_h1.tail(10)[['Open','High','Low','Close']].to_string()
 
-    ข้อมูลราคา 5 แท่งล่าสุด:
+    prompt = f"""
+    วิเคราะห์สัญญาณเทรดทองคำ (XAUUSD) ด้วยกลยุทธ์ Smart Money Concept + Price Action
+
+    ข้อมูลราคา 10 แท่งล่าสุด:
     {recent_data}
 
     สัญญาณที่ระบบพบ:
@@ -118,18 +119,19 @@ def analyze_with_chatgpt(setup, df_h1):
     - SR Confluence: {setup.get('sr_level', 'N/A')}
     - OTE Zone: {setup.get('ote_zone', 'N/A')}
 
-    จงประเมินความน่าเชื่อถือของสัญญาณนี้ ให้คะแนน 0-100
+    จงวิเคราะห์ Price Action เช่น แท่งเทียน, รูปแบบการกลับตัว, แนวรับแนวต้าน, และประเมินว่าสัญญาณนี้มีความน่าเชื่อถือเพียงใด
+    ให้คะแนน 0-100 พร้อมเหตุผลสั้น ๆ และข้อควรระวัง
     ตอบเป็น JSON เท่านั้น: {{"score": 75, "opinion": "....", "risk": "..."}}
     """
     try:
         response = openai.ChatCompletion.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "คุณคือผู้เชี่ยวชาญด้านการเทรดทองคำด้วย SMC"},
+                {"role": "system", "content": "คุณคือผู้เชี่ยวชาญด้านการเทรดทองคำด้วย SMC และ Price Action"},
                 {"role": "user", "content": prompt}
             ],
             temperature=0.2,
-            max_tokens=150
+            max_tokens=200
         )
         content = response['choices'][0]['message']['content']
         result = json.loads(content)
@@ -139,36 +141,78 @@ def analyze_with_chatgpt(setup, df_h1):
         return None
 
 def send_morning_status():
+    """แจ้งเตือนตอน 7 โมงเช้าไทย (Asia Session) ว่าระบบพร้อมทำงาน"""
     now = datetime.now(timezone.utc)
     now_thai = now + timedelta(hours=7)
-    msg = (f"☀️ ระบบ Gold SMC Signal (Pro) ทำงานปกติ\n"
+    msg = (f"🌅 สวัสดีตอนเช้า (Asia Session)\n"
+           f"เวลาไทย: {now_thai.strftime('%H:%M')} น.\n"
            f"วันที่: {now_thai.strftime('%d/%m/%Y')}\n"
-           f"เวลา (ไทย): {now_thai.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: Sweep + BOS + FVG/OB + OTE + Vol\n"
-           f"รอบการทำงาน: ทุก 1 ชั่วโมง\n"
            f"--------------------------------\n"
-           f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
+           f"✅ ระบบ Gold SMC Signal พร้อมทำงานแล้ว\n"
+           f"📊 กลยุทธ์: Sweep + BOS + FVG/OB + OTE + Volume\n"
+           f"🤖 AI วิเคราะห์ Price Action: เปิดอยู่\n"
+           f"⏰ รอบการทำงาน: ทุก 1 ชั่วโมง\n"
+           f"--------------------------------\n"
+           f"จะแจ้งเตือนเมื่อพบ Setup ที่ผ่านเงื่อนไข")
     send_line_message(msg)
+
+def get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120):
+    """ดึงข้อมูลราคาจาก Twelve Data API"""
+    if not TWELVEDATA_API_KEY:
+        raise Exception("ไม่พบ TWELVEDATA_API_KEY ใน environment")
+
+    url = "https://api.twelvedata.com/time_series"
+    params = {
+        "symbol": symbol,
+        "interval": interval,
+        "outputsize": outputsize,
+        "apikey": TWELVEDATA_API_KEY,
+        "timezone": "UTC"
+    }
+    resp = requests.get(url, params=params)
+    data = resp.json()
+
+    if "values" not in data:
+        raise Exception(f"Twelve Data error: {data}")
+
+    df = pd.DataFrame(data["values"])
+    df = df.rename(columns={
+        "datetime": "datetime",
+        "open": "Open",
+        "high": "High",
+        "low": "Low",
+        "close": "Close",
+        "volume": "Volume"
+    })
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.sort_values("datetime")
+
+    if "Volume" not in df.columns:
+        df["Volume"] = 0.0
+        print("⚠️ ไม่มีข้อมูล Volume จาก Twelve Data สำหรับ XAU/USD - จะใช้ Volume=0")
+
+    numeric_cols = ["Open","High","Low","Close","Volume"]
+    df[numeric_cols] = df[numeric_cols].astype(float)
+    df = df.set_index("datetime")
+    return df
 
 def main():
     now_utc = datetime.now(timezone.utc)
     now_thai = now_utc + timedelta(hours=7)
     print(f"=== ระบบเริ่มทำงาน === เวลาไทย: {now_thai.strftime('%d/%m/%Y %H:%M:%S')} น.")
 
+    # แจ้งเตือนตอน 7 โมงเช้าไทย (Asia Session)
     if now_thai.hour == 7 and now_thai.minute < 60:
         print("🕖 ส่งข้อความแจ้งเตือนตอนเช้า...")
         send_morning_status()
 
-    print("กำลังดึงข้อมูลจาก yfinance...")
-    df_h1 = yf.download(SYMBOL, period="5d", interval=TIMEFRAME_H1)
-    df_h4 = yf.download(SYMBOL, period="20d", interval=TIMEFRAME_H4)
-
-    if df_h1.empty or df_h4.empty:
-        print("ไม่สามารถดึงข้อมูลได้")
+    print("กำลังดึงข้อมูลจาก Twelve Data...")
+    try:
+        df_h1 = get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120)
+        df_h4 = get_twelvedata(symbol="XAU/USD", interval="4h", outputsize=120)
+    except Exception as e:
+        print(f"❌ ดึงข้อมูลล้มเหลว: {e}")
         return
-
-    df_h1.columns = ['Open','High','Low','Close','Volume']
-    df_h4.columns = ['Open','High','Low','Close','Volume']
 
     current_price = df_h1['Close'].iloc[-1]
     print(f"ราคาปัจจุบัน: {current_price}")
@@ -198,10 +242,7 @@ def main():
     pending = [o for o in pending if o['status'] == 'active']
     save_state(pending)
 
-    # ตรวจสอบ Session Filter
-    if not is_trading_session():
-        print("❌ อยู่นอกช่วงเวลาทำการ (London/NY) - ไม่เปิดสัญญาณใหม่")
-        return
+    # ====== ลบ Session Filter ออก (เทรดได้ทุกช่วงเวลา) ======
 
     # ตรวจสอบสภาพตลาด
     regime_h1 = detect_market_regime(df_h1)
@@ -237,10 +278,10 @@ def main():
         print(f"❌ RR ต่ำกว่า {MIN_RR} - ข้าม")
         return
 
-    # AI Filter (ถ้ามี)
+    # AI วิเคราะห์ Price Action (ถ้ามี OpenAI API Key)
     gpt_extra = ""
     if os.environ.get('OPENAI_API_KEY'):
-        print("🤖 กำลังวิเคราะห์ด้วย ChatGPT...")
+        print("🤖 กำลังวิเคราะห์ด้วย ChatGPT (Price Action)...")
         gpt_result = analyze_with_chatgpt(setup, df_h1)
         if gpt_result:
             score = gpt_result.get('score', 0)
