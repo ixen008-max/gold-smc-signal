@@ -1,5 +1,6 @@
 import pandas as pd
 from market_regime import detect_market_regime
+from datetime import datetime, timezone, timedelta
 
 def is_valid_ob(df, ob_candle_idx):
     candle = df.iloc[ob_candle_idx]
@@ -26,34 +27,34 @@ def is_choppy(df, period=14, threshold=0.003):
 
 def is_near_news():
     from datetime import datetime, timezone
-    # ====== แก้: ใช้ timezone-aware ======
     now = datetime.now(timezone.utc)
-    
-    # ====== ปรับ: บล็อกเฉพาะช่วงข่าวใหญ่จริง ๆ ======
-    # Non-Farm Payrolls: วันศุกร์แรกของเดือน 12:30-14:00 UTC
+    # บล็อกเฉพาะ NFP (ศุกร์แรกของเดือน 12:30-14:00 UTC)
     if now.weekday() == 4 and 12 <= now.hour <= 14:
-        # เช็คว่าเป็นวันศุกร์แรกของเดือนหรือไม่
         if now.day <= 7:
             return True
-    
-    # FOMC: วันพุธที่มีการประชุม (ประมาณ 18:00-20:00 UTC)
-    # ไม่สามารถเช็คได้ละเอียดในโค้ดง่าย ๆ จึงไม่บล็อก
-    
     return False
 
 def mtf_confirm(df_h1, df_h4):
     regime_h4 = detect_market_regime(df_h4)
     regime_h1 = detect_market_regime(df_h1)
-    
-    # ====== แบบผ่อนปรน: รับสัญญาณจาก H1 ถ้า H4 ไม่ได้แย้งทิศทาง ======
     if regime_h1 == "TREND_UP" and regime_h4 in ["TREND_UP", "HIGH_VOL", "RANGE"]:
         return True
     if regime_h1 == "TREND_DOWN" and regime_h4 in ["TREND_DOWN", "HIGH_VOL", "RANGE"]:
         return True
     if regime_h1 == "RANGE" and regime_h4 == "RANGE":
         return True
-    # ====== เพิ่ม: HIGH_VOL ก็ให้เทรดได้ ถ้า H4 ไม่ใช่ RANGE ======
     if regime_h1 == "HIGH_VOL" and regime_h4 in ["HIGH_VOL", "TREND_UP", "TREND_DOWN"]:
         return True
-    
+    return False
+
+def is_trading_session():
+    """
+    ตรวจสอบว่าเป็นช่วงเวลาที่เหมาะแก่การเทรดหรือไม่
+    เฉพาะ London (14:00-17:00 น. ไทย) และ New York (20:00-23:00 น. ไทย)
+    """
+    now_utc = datetime.now(timezone.utc)
+    now_thai = now_utc + timedelta(hours=7)
+    hour = now_thai.hour
+    if (14 <= hour <= 17) or (20 <= hour <= 23):
+        return True
     return False
