@@ -2,9 +2,11 @@ name: Gold SMC Signal
 
 on:
   schedule:
-    - cron: '0 * * * *'
-    - cron: '0 0 * * *'
-  workflow_dispatch:
+    # รันทุก ๆ 1 ชั่วโมง เฉพาะวันจันทร์-ศุกร์ (UTC)
+    - cron: '0 * * * 1-5'
+    # รันพิเศษตอน 7 โมงเช้าไทย (00:00 UTC) เฉพาะวันจันทร์-ศุกร์
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch:       # ยังสามารถกด Run เองได้เสมอ
 
 jobs:
   run:
@@ -21,6 +23,7 @@ jobs:
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
+          TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python signal_bot.py
       - name: Commit and push pending orders (state)
