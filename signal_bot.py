@@ -256,7 +256,7 @@ def main():
     try:
         df_h4 = get_twelvedata(symbol="XAU/USD", interval="4h", outputsize=120)
         df_h1 = get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120)
-        df_m15 = get_twelvedata(symbol="XAU/USD", interval="15m", outputsize=240)
+        df_m15 = get_twelvedata(symbol="XAU/USD", interval="15min", outputsize=240)   # แก้ตรงนี้เป็น 15min
     except Exception as e:
         print(f"❌ ดึงข้อมูลล้มเหลว: {e}")
         return
@@ -353,7 +353,6 @@ def main():
                             'sr_level': 'N/A',
                             'ote_zone': 'N/A'
                         }
-                    # ตรวจ RR
                     if calculate_rr(setup) < MIN_RR:
                         print("RR ต่ำเกินไป - ข้าม Ichimoku")
                         setup = None
