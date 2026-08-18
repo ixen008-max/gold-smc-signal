@@ -138,6 +138,18 @@ def send_morning_status():
            f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
     send_line_message(msg)
 
+def send_running_status():
+    now = datetime.now(timezone.utc)
+    now_thai = now + timedelta(hours=7)
+    msg = (f"🔄 ระบบกำลังทำงาน\n"
+           f"เวลาไทย: {now_thai.strftime('%H:%M')} น.\n"
+           f"วันที่: {now_thai.strftime('%d/%m/%Y')}\n"
+           f"สถานะ: กำลังวิเคราะห์ตลาดทองคำ\n"
+           f"กลยุทธ์: SMC + Ichimoku (H4+H1+M15)\n"
+           f"--------------------------------\n"
+           f"จะแจ้งเตือนอีกครั้งเมื่อพบสัญญาณ")
+    send_line_message(msg)
+
 def get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120):
     if not TWELVEDATA_API_KEY:
         raise Exception("ไม่พบ TWELVEDATA_API_KEY")
@@ -162,7 +174,6 @@ def get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120):
     return df
 
 def refine_entry_with_m15(setup, df_m15):
-    """ปรับจุดเข้าด้วย M15 โดยหาจุด FVG/OB ระหว่างราคาปัจจุบันกับ Entry เดิม"""
     if df_m15 is None or df_m15.empty:
         return setup
     current_price = df_m15['Close'].iloc[-1]
@@ -234,6 +245,10 @@ def main():
     now_thai = now_utc + timedelta(hours=7)
     print(f"=== ระบบ Gold SMC+Ichimoku เริ่มทำงาน === เวลาไทย: {now_thai.strftime('%d/%m/%Y %H:%M:%S')} น.")
 
+    # ส่งข้อความแจ้งเตือนทุก ๆ 4 ครั้ง (ทุกต้นชั่วโมง) โดยเผื่อเวลาหน่วง
+    if now_thai.minute <= 2:
+        send_running_status()
+
     if now_thai.hour == 7 and now_thai.minute < 60:
         send_morning_status()
 
@@ -301,16 +316,14 @@ def main():
         print("🔍 กำลังหาสัญญาณ Ichimoku...")
         signal = get_ichimoku_signal(df_h1)
         if signal:
-            # ยืนยันด้วย H4 และ Trigger M15
             if confirm_with_h4_ichimoku(df_h4, signal) and trigger_with_m15_ichimoku(df_m15, signal):
                 if is_near_news():
                     print("ใกล้ข่าวสำคัญ - ข้าม Ichimoku")
                 else:
-                    # สร้าง setup จาก Ichimoku
                     tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h1)
                     if signal == "BUY":
-                        entry = df_h1['Close'].iloc[-1]  # ราคาปัจจุบัน เป็นจุดเข้าแบบ market?  แต่ยังไม่ดี ควรใช้ M15 low?
-                        sl = min(senkou_a.iloc[-1], senkou_b.iloc[-1]) - 3.0  # ใต้ Kumo
+                        entry = df_m15['Low'].iloc[-1]  # ใช้ Low ล่าสุดของ M15 เป็น Buy Limit
+                        sl = min(senkou_a.iloc[-1], senkou_b.iloc[-1]) - 3.0
                         tp = entry + (entry - sl) * MIN_RR
                         invalidation = min(senkou_a.iloc[-1], senkou_b.iloc[-1])
                         setup = {
@@ -325,7 +338,7 @@ def main():
                             'ote_zone': 'N/A'
                         }
                     else:
-                        entry = df_h1['Close'].iloc[-1]
+                        entry = df_m15['High'].iloc[-1]
                         sl = max(senkou_a.iloc[-1], senkou_b.iloc[-1]) + 3.0
                         tp = entry - (sl - entry) * MIN_RR
                         invalidation = max(senkou_a.iloc[-1], senkou_b.iloc[-1])
@@ -340,14 +353,6 @@ def main():
                             'sr_level': 'N/A',
                             'ote_zone': 'N/A'
                         }
-                    # ปรับ entry ด้วย M15 (ใช้ราคาปัจจุบัน อาจไม่ดี) ควรให้ refined? ง่าย ๆ ใช้ราคาปัจจุบันเป็น pending ไม่ได้
-                    # แก้เป็นใช้ M15 ระดับ low/high
-                    if signal == "BUY":
-                        m15_low = df_m15['Low'].iloc[-1]
-                        setup['entry'] = m15_low  # ตั้ง Buy Limit ที่ low ล่าสุด
-                    else:
-                        m15_high = df_m15['High'].iloc[-1]
-                        setup['entry'] = m15_high
                     # ตรวจ RR
                     if calculate_rr(setup) < MIN_RR:
                         print("RR ต่ำเกินไป - ข้าม Ichimoku")
