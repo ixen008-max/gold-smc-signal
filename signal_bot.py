@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from market_regime import detect_market_regime
-from smc_strategy import find_smc_setup, find_swings, find_order_blocks, find_fvg
+from smc_strategy import find_smc_setup, find_swings, find_order_blocks, find_fvg, calculate_atr
 from ichimoku_strategy import calculate_ichimoku, get_ichimoku_signal
 from filters import is_near_news, mtf_confirm
 
@@ -16,7 +16,8 @@ TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY')
 
 STATE_FILE = "pending_orders.json"
 MAX_AGE_HOURS = 12
-MIN_RR = 2.0
+MIN_RR = 1.67          # กำไรต้อง ≥ 1.67 เท่าของขาดทุน
+MIN_SL_DISTANCE = 2.0  # ระยะ SL ขั้นต่ำ (USD)
 
 def send_line_message(text):
     url = "https://api.line.me/v2/bot/message/push"
@@ -37,12 +38,12 @@ def save_state(orders):
         json.dump(orders, f, indent=2)
 
 def clean_expired(orders, now):
-    return [o for o in orders if (o['status']=='active' and 
+    return [o for o in orders if (o['status'] == 'active' and 
             (datetime.fromisoformat(o['created_time']) + timedelta(hours=o['expiry_hours']) > now))]
 
 def has_nearby(orders, entry, pip_dist=5.0):
     for o in orders:
-        if o['status']=='active' and abs(o['entry'] - entry) < pip_dist * 0.1:
+        if o['status'] == 'active' and abs(o['entry'] - entry) < pip_dist * 0.1:
             return True
     return False
 
@@ -79,77 +80,6 @@ def calculate_rr(order):
         return 0
     return reward / risk
 
-def analyze_with_chatgpt(setup, df_h1):
-    try:
-        import openai
-    except ImportError:
-        return None
-    api_key = os.environ.get('OPENAI_API_KEY')
-    if not api_key:
-        return None
-    openai.api_key = api_key
-
-    recent_data = df_h1.tail(10)[['Open','High','Low','Close']].to_string()
-    prompt = f"""
-    วิเคราะห์สัญญาณเทรดทองคำ (XAUUSD) ด้วยกลยุทธ์ SMC/Ichimoku + Price Action
-
-    ข้อมูลราคา 10 แท่ง H1:
-    {recent_data}
-
-    สัญญาณที่ระบบพบ:
-    - Direction: {setup['type']}
-    - Entry: {setup['entry']:.2f}
-    - SL: {setup['sl']:.2f}
-    - TP: {setup['tp']:.2f}
-    - Invalidation: {setup['invalidation']:.2f}
-    - Strategy: {setup['strategy']}
-    - Fibonacci Level: {setup.get('fib_level', 'N/A')}
-    - SR Confluence: {setup.get('sr_level', 'N/A')}
-    - OTE Zone: {setup.get('ote_zone', 'N/A')}
-
-    จงประเมินความน่าเชื่อถือของสัญญาณนี้ ให้คะแนน 0-100
-    ตอบเป็น JSON เท่านั้น: {{"score": 75, "opinion": "....", "risk": "..."}}
-    """
-    try:
-        response = openai.ChatCompletion.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "คุณคือผู้เชี่ยวชาญด้านการเทรดทองคำด้วย SMC และ Ichimoku"},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.2,
-            max_tokens=200
-        )
-        content = response['choices'][0]['message']['content']
-        return json.loads(content)
-    except Exception as e:
-        print(f"ChatGPT error: {e}")
-        return None
-
-def send_morning_status():
-    now = datetime.now(timezone.utc)
-    now_thai = now + timedelta(hours=7)
-    msg = (f"☀️ ระบบ Gold SMC+Ichimoku ทำงานปกติ\n"
-           f"วันที่: {now_thai.strftime('%d/%m/%Y')}\n"
-           f"เวลา (ไทย): {now_thai.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC + Ichimoku (H4+H1+M15)\n"
-           f"รอบการทำงาน: ทุก 15 นาที\n"
-           f"--------------------------------\n"
-           f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
-    send_line_message(msg)
-
-def send_running_status():
-    now = datetime.now(timezone.utc)
-    now_thai = now + timedelta(hours=7)
-    msg = (f"🔄 ระบบกำลังทำงาน\n"
-           f"เวลาไทย: {now_thai.strftime('%H:%M')} น.\n"
-           f"วันที่: {now_thai.strftime('%d/%m/%Y')}\n"
-           f"สถานะ: กำลังวิเคราะห์ตลาดทองคำ\n"
-           f"กลยุทธ์: SMC + Ichimoku (H4+H1+M15)\n"
-           f"--------------------------------\n"
-           f"จะแจ้งเตือนอีกครั้งเมื่อพบสัญญาณ")
-    send_line_message(msg)
-
 def get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120):
     if not TWELVEDATA_API_KEY:
         raise Exception("ไม่พบ TWELVEDATA_API_KEY")
@@ -167,13 +97,13 @@ def get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120):
     df = df.sort_values("datetime")
     if "Volume" not in df.columns:
         df["Volume"] = 0.0
-        print(f"⚠️ ไม่มีข้อมูล Volume จาก Twelve Data สำหรับ {symbol} - จะใช้ Volume=0")
     numeric_cols = ["Open","High","Low","Close","Volume"]
     df[numeric_cols] = df[numeric_cols].astype(float)
     df = df.set_index("datetime")
     return df
 
 def refine_entry_with_m15(setup, df_m15):
+    """ปรับจุดเข้าด้วย M15 สำหรับ SMC โดยหา FVG/OB ใกล้ราคาปัจจุบัน"""
     if df_m15 is None or df_m15.empty:
         return setup
     current_price = df_m15['Close'].iloc[-1]
@@ -185,7 +115,7 @@ def refine_entry_with_m15(setup, df_m15):
         zone_top = current_price + 5.0
         zone_bottom = entry_original
 
-    fvg_list = find_fvg(df_m15, direction='bullish' if setup['type']=='BUY_LIMIT' else 'bearish')
+    fvg_list = find_fvg(df_m15, direction='bullish' if setup['type'] == 'BUY_LIMIT' else 'bearish')
     swings_high, swings_low = find_swings(df_m15, window=3)
     if setup['type'] == 'BUY_LIMIT':
         obs = find_order_blocks(df_m15, swings_low, mode='Bullish')
@@ -210,7 +140,7 @@ def refine_entry_with_m15(setup, df_m15):
                 candidates.append(top)
 
     if candidates:
-        new_entry = min(candidates) if setup['type']=='BUY_LIMIT' else max(candidates)
+        new_entry = min(candidates) if setup['type'] == 'BUY_LIMIT' else max(candidates)
         temp_order = {'type': setup['type'], 'entry': new_entry, 'sl': setup['sl'], 'tp': setup['tp']}
         if calculate_rr(temp_order) >= MIN_RR:
             setup['entry'] = new_entry
@@ -218,6 +148,7 @@ def refine_entry_with_m15(setup, df_m15):
     return setup
 
 def confirm_with_h4_ichimoku(df_h4, signal):
+    """ยืนยันสัญญาณ Ichimoku ด้วย H4"""
     if df_h4 is None or df_h4.empty:
         return True
     tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h4)
@@ -229,6 +160,7 @@ def confirm_with_h4_ichimoku(df_h4, signal):
     return False
 
 def trigger_with_m15_ichimoku(df_m15, signal):
+    """Trigger ด้วย M15 สำหรับ Ichimoku"""
     if df_m15 is None or df_m15.empty:
         return True
     last3 = df_m15.tail(3)
@@ -240,15 +172,136 @@ def trigger_with_m15_ichimoku(df_m15, signal):
                 last3['High'].iloc[-1] > last3['High'].iloc[-2])
     return False
 
+def is_killzone():
+    """ตรวจสอบช่วงเวลา London/NY Killzone ตามเวลาไทย"""
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    hour = now.hour
+    if (14 <= hour <= 17) or (20 <= hour <= 23):
+        return True
+    return False
+
+def detect_trend_ichimoku(df_h4, df_h1):
+    """ใช้ Ichimoku H4/H1 กำหนดแนวโน้ม คืนค่า bullish/bearish/sideways"""
+    if df_h4 is None or df_h4.empty or df_h1 is None or df_h1.empty:
+        return 'sideways'
+
+    tenkan4, kijun4, senkou_a4, senkou_b4, _ = calculate_ichimoku(df_h4)
+    price4 = df_h4['Close'].iloc[-1]
+    h4_bull = price4 > max(senkou_a4.iloc[-1], senkou_b4.iloc[-1]) and tenkan4.iloc[-1] > kijun4.iloc[-1]
+    h4_bear = price4 < min(senkou_a4.iloc[-1], senkou_b4.iloc[-1]) and tenkan4.iloc[-1] < kijun4.iloc[-1]
+
+    tenkan1, kijun1, senkou_a1, senkou_b1, _ = calculate_ichimoku(df_h1)
+    price1 = df_h1['Close'].iloc[-1]
+    h1_bull = price1 > max(senkou_a1.iloc[-1], senkou_b1.iloc[-1]) and tenkan1.iloc[-1] > kijun1.iloc[-1]
+    h1_bear = price1 < min(senkou_a1.iloc[-1], senkou_b1.iloc[-1]) and tenkan1.iloc[-1] < kijun1.iloc[-1]
+
+    if h4_bull and h1_bull:
+        return 'bullish'
+    elif h4_bear and h1_bear:
+        return 'bearish'
+    else:
+        return 'sideways'
+
+def silver_bullet_signal(df_h4, df_h1, df_m15):
+    """กลยุทธ์สำรอง Silver Bullet เฉพาะช่วง Killzone"""
+    if not is_killzone():
+        return None
+
+    trend = detect_trend_ichimoku(df_h4, df_h1)
+    if trend not in ['bullish', 'bearish']:
+        return None
+
+    swings_high, swings_low = find_swings(df_m15, window=3)
+    if not swings_high or not swings_low:
+        return None
+
+    current_price = df_m15['Close'].iloc[-1]
+    current_low = df_m15['Low'].iloc[-1]
+    current_high = df_m15['High'].iloc[-1]
+
+    setup = None
+
+    if trend == 'bullish':
+        last_low_idx, last_low_price = swings_low[-1]
+        if current_low < last_low_price and current_price > last_low_price:
+            fvgs = find_fvg(df_m15, direction='bullish')
+            for top, bottom, idx in reversed(fvgs):
+                if bottom < current_price and bottom > last_low_price:
+                    entry = bottom
+                    sl = last_low_price - 0.5
+                    invalidation = last_low_price
+                    if entry - sl < MIN_SL_DISTANCE:
+                        continue
+                    tp = entry + MIN_RR * (entry - sl)
+                    setup = {
+                        'type': 'BUY_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'Silver Bullet + Trend',
+                        'fib_level': 'N/A',
+                        'sr_level': 'N/A',
+                        'ote_zone': 'N/A'
+                    }
+                    break
+    elif trend == 'bearish':
+        last_high_idx, last_high_price = swings_high[-1]
+        if current_high > last_high_price and current_price < last_high_price:
+            fvgs = find_fvg(df_m15, direction='bearish')
+            for top, bottom, idx in reversed(fvgs):
+                if top > current_price and top < last_high_price:
+                    entry = top
+                    sl = last_high_price + 0.5
+                    invalidation = last_high_price
+                    if sl - entry < MIN_SL_DISTANCE:
+                        continue
+                    tp = entry - MIN_RR * (sl - entry)
+                    setup = {
+                        'type': 'SELL_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'Silver Bullet + Trend',
+                        'fib_level': 'N/A',
+                        'sr_level': 'N/A',
+                        'ote_zone': 'N/A'
+                    }
+                    break
+
+    return setup
+
+def send_running_status():
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    msg = (f"🔄 ระบบกำลังทำงาน\n"
+           f"เวลาไทย: {now.strftime('%H:%M')} น.\n"
+           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet\n"
+           f"RR ขั้นต่ำ: 1.67\n"
+           f"รอบ: ทุก 15 นาที")
+    send_line_message(msg)
+
+def send_morning_status():
+    now = datetime.now(timezone.utc) + timedelta(hours=7)
+    msg = (f"☀️ ระบบ Gold Signal ทำงานปกติ\n"
+           f"วันที่: {now.strftime('%d/%m/%Y')}\n"
+           f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
+           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet\n"
+           f"RR ขั้นต่ำ: 1.67\n"
+           f"--------------------------------\n"
+           f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
+    send_line_message(msg)
+
 def main():
     now_utc = datetime.now(timezone.utc)
     now_thai = now_utc + timedelta(hours=7)
-    print(f"=== ระบบ Gold SMC+Ichimoku เริ่มทำงาน === เวลาไทย: {now_thai.strftime('%d/%m/%Y %H:%M:%S')} น.")
+    print(f"=== ระบบเริ่มทำงาน === เวลาไทย: {now_thai.strftime('%d/%m/%Y %H:%M:%S')} น.")
 
-    # ส่งข้อความแจ้งเตือนทุก ๆ 4 ครั้ง (ทุกต้นชั่วโมง) โดยเผื่อเวลาหน่วง
+    # ส่งสถานะรายชั่วโมง
     if now_thai.minute <= 2:
         send_running_status()
 
+    # ส่งข้อความตอนเช้า
     if now_thai.hour == 7 and now_thai.minute < 60:
         send_morning_status()
 
@@ -256,7 +309,7 @@ def main():
     try:
         df_h4 = get_twelvedata(symbol="XAU/USD", interval="4h", outputsize=120)
         df_h1 = get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120)
-        df_m15 = get_twelvedata(symbol="XAU/USD", interval="15min", outputsize=240)   # แก้ตรงนี้เป็น 15min
+        df_m15 = get_twelvedata(symbol="XAU/USD", interval="15min", outputsize=240)
     except Exception as e:
         print(f"❌ ดึงข้อมูลล้มเหลว: {e}")
         return
@@ -270,119 +323,119 @@ def main():
     if cancelled:
         for o in cancelled:
             msg = (f"❌ ยกเลิกสัญญาณ {o['type']}\n"
-                   f"Entry: {o['entry']}\n"
-                   f"Invalidation: {o['invalidation']}\n"
-                   f"เหตุผล: ราคาทะลุจุด Invalidation")
+                   f"Entry: {o['entry']}\nInvalidation: {o['invalidation']}\nเหตุผล: ราคาทะลุจุด Invalidation")
             send_line_message(msg)
-            print(f"ยกเลิกสัญญาณ {o['id']}")
     if triggered:
         for o in triggered:
-            msg = (f"⚡ ราคามาถึง Entry ของ {o['type']}\n"
-                   f"Entry: {o['entry']}\n"
-                   f"SL: {o['sl']}\n"
-                   f"TP: {o['tp']}\n"
-                   f"โปรดตรวจสอบคำสั่งของคุณ")
+            msg = (f"⚡ ราคามาถึง Entry ของ {o['type']}\nEntry: {o['entry']}\nSL: {o['sl']}\nTP: {o['tp']}\nโปรดตรวจสอบ")
             send_line_message(msg)
-            print(f"Triggered: {o['id']}")
-
     pending = clean_expired(pending, now_utc)
     pending = [o for o in pending if o['status'] == 'active']
     save_state(pending)
 
-    # ตรวจสอบสภาพตลาดและ MTF (สำหรับ SMC)
+    # จำกัด pending ไม่เกิน 2 ไม้
+    if len(pending) >= 2:
+        print("❌ มี pending ครบ 2 ไม้แล้ว - ไม่เปิดสัญญาณใหม่")
+        return
+
+    # ตรวจข่าวสำคัญ (NFP คร่าว ๆ)
+    if is_near_news():
+        print("⛔ ใกล้ข่าวสำคัญ - ข้ามการเปิดสัญญาณ")
+        msg = "⛔ ตรวจพบข่าวสำคัญ ระบบจะไม่เปิดสัญญาณใหม่จนกว่าจะผ่านช่วงข่าว"
+        send_line_message(msg)
+        return
+
+    # ===== 1. ลองหา SMC =====
+    setup = None
     regime_h4 = detect_market_regime(df_h4)
     regime_h1 = detect_market_regime(df_h1)
-    print(f"📊 สภาพตลาด H4: {regime_h4}")
-    print(f"📊 สภาพตลาด H1: {regime_h1}")
+    print(f"📊 H4: {regime_h4}, H1: {regime_h1}")
 
-    setup = None
-
-    # ====== 1. ลองหา SMC Setup ก่อน ======
     if mtf_confirm(df_h1, df_h4):
-        print("🔍 กำลังหาสัญญาณ SMC...")
+        print("🔍 กำลังหา SMC...")
         setup = find_smc_setup(df_h1)
         if setup:
-            print("✅ พบ SMC Setup")
-            if is_near_news():
-                print("ใกล้ข่าวสำคัญ - ข้าม")
+            rr = calculate_rr(setup)
+            sl_dist = abs(setup['entry'] - setup['sl'])
+            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                print(f"❌ SMC ไม่ผ่าน RR/SL distance (RR={rr:.2f}, SL={sl_dist:.2f}) - ข้าม")
                 setup = None
             else:
                 setup = refine_entry_with_m15(setup, df_m15)
     else:
-        print("❌ MTF ไม่ยืนยันสำหรับ SMC - ข้าม SMC")
+        print("MTF ไม่ยืนยันสำหรับ SMC")
 
-    # ====== 2. ถ้าไม่มี SMC ให้ลอง Ichimoku ======
+    # ===== 2. ถ้า SMC ไม่พบ ลอง Ichimoku =====
     if setup is None:
-        print("🔍 กำลังหาสัญญาณ Ichimoku...")
+        print("🔍 กำลังหา Ichimoku...")
         signal = get_ichimoku_signal(df_h1)
         if signal:
             if confirm_with_h4_ichimoku(df_h4, signal) and trigger_with_m15_ichimoku(df_m15, signal):
-                if is_near_news():
-                    print("ใกล้ข่าวสำคัญ - ข้าม Ichimoku")
+                tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h1)
+                if signal == "BUY":
+                    entry = df_m15['Low'].iloc[-1]
+                    sl = min(senkou_a.iloc[-1], senkou_b.iloc[-1]) - 3.0
+                    invalidation = min(senkou_a.iloc[-1], senkou_b.iloc[-1])
+                    tp = entry + MIN_RR * (entry - sl)
+                    setup = {
+                        'type': 'BUY_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': f'Ichimoku + H4 + M15 ({signal})',
+                        'fib_level': 'N/A',
+                        'sr_level': 'N/A',
+                        'ote_zone': 'N/A'
+                    }
                 else:
-                    tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h1)
-                    if signal == "BUY":
-                        entry = df_m15['Low'].iloc[-1]  # ใช้ Low ล่าสุดของ M15 เป็น Buy Limit
-                        sl = min(senkou_a.iloc[-1], senkou_b.iloc[-1]) - 3.0
-                        tp = entry + (entry - sl) * MIN_RR
-                        invalidation = min(senkou_a.iloc[-1], senkou_b.iloc[-1])
-                        setup = {
-                            'type': 'BUY_LIMIT',
-                            'entry': entry,
-                            'sl': sl,
-                            'tp': tp,
-                            'invalidation': invalidation,
-                            'strategy': f'Ichimoku + H4 + M15 ({signal})',
-                            'fib_level': 'N/A',
-                            'sr_level': 'N/A',
-                            'ote_zone': 'N/A'
-                        }
-                    else:
-                        entry = df_m15['High'].iloc[-1]
-                        sl = max(senkou_a.iloc[-1], senkou_b.iloc[-1]) + 3.0
-                        tp = entry - (sl - entry) * MIN_RR
-                        invalidation = max(senkou_a.iloc[-1], senkou_b.iloc[-1])
-                        setup = {
-                            'type': 'SELL_LIMIT',
-                            'entry': entry,
-                            'sl': sl,
-                            'tp': tp,
-                            'invalidation': invalidation,
-                            'strategy': f'Ichimoku + H4 + M15 ({signal})',
-                            'fib_level': 'N/A',
-                            'sr_level': 'N/A',
-                            'ote_zone': 'N/A'
-                        }
-                    if calculate_rr(setup) < MIN_RR:
-                        print("RR ต่ำเกินไป - ข้าม Ichimoku")
-                        setup = None
+                    entry = df_m15['High'].iloc[-1]
+                    sl = max(senkou_a.iloc[-1], senkou_b.iloc[-1]) + 3.0
+                    invalidation = max(senkou_a.iloc[-1], senkou_b.iloc[-1])
+                    tp = entry - MIN_RR * (sl - entry)
+                    setup = {
+                        'type': 'SELL_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': f'Ichimoku + H4 + M15 ({signal})',
+                        'fib_level': 'N/A',
+                        'sr_level': 'N/A',
+                        'ote_zone': 'N/A'
+                    }
+                rr = calculate_rr(setup)
+                sl_dist = abs(setup['entry'] - setup['sl'])
+                if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                    print(f"❌ Ichimoku ไม่ผ่าน RR/SL (RR={rr:.2f}, SL={sl_dist:.2f}) - ข้าม")
+                    setup = None
             else:
                 print("Ichimoku ไม่ผ่าน H4/M15 Trigger")
                 setup = None
         else:
             print("ไม่มีสัญญาณ Ichimoku")
 
-    # ====== 3. ถ้าไม่มี Setup จบ ======
+    # ===== 3. ถ้ายังไม่มี setup → Silver Bullet =====
+    if setup is None:
+        print("🔍 กำลังหา Silver Bullet...")
+        setup = silver_bullet_signal(df_h4, df_h1, df_m15)
+        if setup:
+            rr = calculate_rr(setup)
+            sl_dist = abs(setup['entry'] - setup['sl'])
+            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                print(f"❌ Silver Bullet ไม่ผ่าน RR/SL - ข้าม")
+                setup = None
+
     if setup is None:
         print("❌ ไม่พบ Setup ตามเงื่อนไข")
         return
 
-    # AI Filter (ถ้ามี)
-    gpt_extra = ""
-    if os.environ.get('OPENAI_API_KEY'):
-        print("🤖 กำลังวิเคราะห์ด้วย ChatGPT...")
-        gpt_result = analyze_with_chatgpt(setup, df_h1)
-        if gpt_result:
-            score = gpt_result.get('score', 0)
-            print(f"ChatGPT Score: {score}")
-            if score < 70:
-                print("❌ สัญญาณไม่ผ่าน AI")
-                return
-            gpt_extra = (f"\n🤖 AI Score: {score}\n"
-                         f"ความเห็น: {gpt_result.get('opinion')}\n"
-                         f"ความเสี่ยง: {gpt_result.get('risk')}")
+    # ตรวจ RR ขั้นสุดท้าย
+    rr = calculate_rr(setup)
+    if rr < MIN_RR:
+        print(f"❌ RR ต่ำกว่า {MIN_RR} - ไม่ส่ง")
+        return
 
-    # ป้องกันซ้ำ
     if has_nearby(pending, setup['entry']):
         print("มี pending ใกล้เคียงอยู่แล้ว")
         return
@@ -408,9 +461,8 @@ def main():
     pending.append(order)
     save_state(pending)
 
-    rr = calculate_rr(order)
     rr_str = f"{rr:.2f}"
-    msg = (f"📊 GOLD SIGNAL (Pro)\n"
+    msg = (f"📊 GOLD SIGNAL\n"
            f"Direction: {order['type']}\n"
            f"Entry: {order['entry']}\n"
            f"SL: {order['sl']}\n"
@@ -420,18 +472,11 @@ def main():
            f"Strategy: {order['strategy']}\n"
            f"Fibonacci: {order['fib_level']}\n"
            f"S/R: {order['sr_level']}\n"
-           f"OTE Zone: {order['ote_zone']}\n"
+           f"OTE: {order['ote_zone']}\n"
            f"Expiry: {MAX_AGE_HOURS}h\n"
-           f"{gpt_extra}\n"
-           f"⚠️ รอราคามาที่ Entry แล้ววางคำสั่งด้วยตนเอง\n"
-           f"❌ หากราคาทะลุ Invalidation ก่อนถึง Entry ให้ยกเลิกสัญญาณ")
-    status = send_line_message(msg)
-    if status == 200:
-        print("✅ ส่งสัญญาณสำเร็จ!")
-    else:
-        print("❌ ส่งไม่สำเร็จ")
-
-    print(f"ราคา Invalidation: {order['invalidation']}")
+           f"⚠️ เทรดด้วยตนเอง")
+    send_line_message(msg)
+    print("✅ ส่งสัญญาณแล้ว")
 
 if __name__ == "__main__":
     main()
