@@ -5,10 +5,9 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
-from market_regime import detect_market_regime
 from smc_strategy import find_smc_setup, find_swings, find_order_blocks, find_fvg, calculate_atr
 from ichimoku_strategy import calculate_ichimoku, get_ichimoku_signal
-from filters import is_near_news, mtf_confirm
+from filters import is_near_news
 
 LINE_CHANNEL_ACCESS_TOKEN = os.environ['LINE_CHANNEL_ACCESS_TOKEN']
 LINE_USER_ID = os.environ['LINE_USER_ID']
@@ -16,8 +15,11 @@ TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY')
 
 STATE_FILE = "pending_orders.json"
 MAX_AGE_HOURS = 12
-MIN_RR = 1.67          # กำไรต้อง ≥ 1.67 เท่าของขาดทุน
-MIN_SL_DISTANCE = 2.0  # ระยะ SL ขั้นต่ำ (USD)
+MIN_RR = 1.67
+MIN_SL_DISTANCE = 2.0
+
+TIMEFRAME_MAIN = "1h"
+TIMEFRAME_REFINE = "15min"
 
 def send_line_message(text):
     url = "https://api.line.me/v2/bot/message/push"
@@ -147,18 +149,6 @@ def refine_entry_with_m15(setup, df_m15):
             setup['strategy'] += " + M15 Refined"
     return setup
 
-def confirm_with_h4_ichimoku(df_h4, signal):
-    """ยืนยันสัญญาณ Ichimoku ด้วย H4"""
-    if df_h4 is None or df_h4.empty:
-        return True
-    tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h4)
-    current_price = df_h4['Close'].iloc[-1]
-    if signal == "BUY":
-        return current_price > max(senkou_a.iloc[-1], senkou_b.iloc[-1]) and tenkan.iloc[-1] > kijun.iloc[-1]
-    elif signal == "SELL":
-        return current_price < min(senkou_a.iloc[-1], senkou_b.iloc[-1]) and tenkan.iloc[-1] < kijun.iloc[-1]
-    return False
-
 def trigger_with_m15_ichimoku(df_m15, signal):
     """Trigger ด้วย M15 สำหรับ Ichimoku"""
     if df_m15 is None or df_m15.empty:
@@ -180,34 +170,31 @@ def is_killzone():
         return True
     return False
 
-def detect_trend_ichimoku(df_h4, df_h1):
-    """ใช้ Ichimoku H4/H1 กำหนดแนวโน้ม คืนค่า bullish/bearish/sideways"""
-    if df_h4 is None or df_h4.empty or df_h1 is None or df_h1.empty:
+def detect_trend_ichimoku_h1(df_h1):
+    """ใช้ Ichimoku H1 กำหนดแนวโน้ม คืนค่า bullish/bearish/sideways"""
+    if df_h1 is None or df_h1.empty:
         return 'sideways'
 
-    tenkan4, kijun4, senkou_a4, senkou_b4, _ = calculate_ichimoku(df_h4)
-    price4 = df_h4['Close'].iloc[-1]
-    h4_bull = price4 > max(senkou_a4.iloc[-1], senkou_b4.iloc[-1]) and tenkan4.iloc[-1] > kijun4.iloc[-1]
-    h4_bear = price4 < min(senkou_a4.iloc[-1], senkou_b4.iloc[-1]) and tenkan4.iloc[-1] < kijun4.iloc[-1]
+    tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h1)
+    price = df_h1['Close'].iloc[-1]
+    above_cloud = price > max(senkou_a.iloc[-1], senkou_b.iloc[-1])
+    below_cloud = price < min(senkou_a.iloc[-1], senkou_b.iloc[-1])
+    tenkan_above_kijun = tenkan.iloc[-1] > kijun.iloc[-1]
+    tenkan_below_kijun = tenkan.iloc[-1] < kijun.iloc[-1]
 
-    tenkan1, kijun1, senkou_a1, senkou_b1, _ = calculate_ichimoku(df_h1)
-    price1 = df_h1['Close'].iloc[-1]
-    h1_bull = price1 > max(senkou_a1.iloc[-1], senkou_b1.iloc[-1]) and tenkan1.iloc[-1] > kijun1.iloc[-1]
-    h1_bear = price1 < min(senkou_a1.iloc[-1], senkou_b1.iloc[-1]) and tenkan1.iloc[-1] < kijun1.iloc[-1]
-
-    if h4_bull and h1_bull:
+    if above_cloud and tenkan_above_kijun:
         return 'bullish'
-    elif h4_bear and h1_bear:
+    elif below_cloud and tenkan_below_kijun:
         return 'bearish'
     else:
         return 'sideways'
 
-def silver_bullet_signal(df_h4, df_h1, df_m15):
+def silver_bullet_signal(df_h1, df_m15):
     """กลยุทธ์สำรอง Silver Bullet เฉพาะช่วง Killzone"""
     if not is_killzone():
         return None
 
-    trend = detect_trend_ichimoku(df_h4, df_h1)
+    trend = detect_trend_ichimoku_h1(df_h1)
     if trend not in ['bullish', 'bearish']:
         return None
 
@@ -276,7 +263,7 @@ def send_running_status():
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     msg = (f"🔄 ระบบกำลังทำงาน\n"
            f"เวลาไทย: {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet\n"
+           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet (1h/15m)\n"
            f"RR ขั้นต่ำ: 1.67\n"
            f"รอบ: ทุก 15 นาที")
     send_line_message(msg)
@@ -287,6 +274,7 @@ def send_morning_status():
            f"วันที่: {now.strftime('%d/%m/%Y')}\n"
            f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
            f"กลยุทธ์: SMC + Ichimoku + Silver Bullet\n"
+           f"Timeframe: 1h + 15m\n"
            f"RR ขั้นต่ำ: 1.67\n"
            f"--------------------------------\n"
            f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
@@ -307,9 +295,8 @@ def main():
 
     print("กำลังดึงข้อมูลจาก Twelve Data...")
     try:
-        df_h4 = get_twelvedata(symbol="XAU/USD", interval="4h", outputsize=120)
-        df_h1 = get_twelvedata(symbol="XAU/USD", interval="1h", outputsize=120)
-        df_m15 = get_twelvedata(symbol="XAU/USD", interval="15min", outputsize=240)
+        df_h1 = get_twelvedata(symbol="XAU/USD", interval=TIMEFRAME_MAIN, outputsize=120)
+        df_m15 = get_twelvedata(symbol="XAU/USD", interval=TIMEFRAME_REFINE, outputsize=240)
     except Exception as e:
         print(f"❌ ดึงข้อมูลล้มเหลว: {e}")
         return
@@ -347,30 +334,23 @@ def main():
 
     # ===== 1. ลองหา SMC =====
     setup = None
-    regime_h4 = detect_market_regime(df_h4)
-    regime_h1 = detect_market_regime(df_h1)
-    print(f"📊 H4: {regime_h4}, H1: {regime_h1}")
-
-    if mtf_confirm(df_h1, df_h4):
-        print("🔍 กำลังหา SMC...")
-        setup = find_smc_setup(df_h1)
-        if setup:
-            rr = calculate_rr(setup)
-            sl_dist = abs(setup['entry'] - setup['sl'])
-            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
-                print(f"❌ SMC ไม่ผ่าน RR/SL distance (RR={rr:.2f}, SL={sl_dist:.2f}) - ข้าม")
-                setup = None
-            else:
-                setup = refine_entry_with_m15(setup, df_m15)
-    else:
-        print("MTF ไม่ยืนยันสำหรับ SMC")
+    print("🔍 กำลังหา SMC...")
+    setup = find_smc_setup(df_h1)
+    if setup:
+        rr = calculate_rr(setup)
+        sl_dist = abs(setup['entry'] - setup['sl'])
+        if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+            print(f"❌ SMC ไม่ผ่าน RR/SL distance (RR={rr:.2f}, SL={sl_dist:.2f}) - ข้าม")
+            setup = None
+        else:
+            setup = refine_entry_with_m15(setup, df_m15)
 
     # ===== 2. ถ้า SMC ไม่พบ ลอง Ichimoku =====
     if setup is None:
         print("🔍 กำลังหา Ichimoku...")
         signal = get_ichimoku_signal(df_h1)
         if signal:
-            if confirm_with_h4_ichimoku(df_h4, signal) and trigger_with_m15_ichimoku(df_m15, signal):
+            if trigger_with_m15_ichimoku(df_m15, signal):
                 tenkan, kijun, senkou_a, senkou_b, _ = calculate_ichimoku(df_h1)
                 if signal == "BUY":
                     entry = df_m15['Low'].iloc[-1]
@@ -383,7 +363,7 @@ def main():
                         'sl': sl,
                         'tp': tp,
                         'invalidation': invalidation,
-                        'strategy': f'Ichimoku + H4 + M15 ({signal})',
+                        'strategy': f'Ichimoku + H1 + M15 ({signal})',
                         'fib_level': 'N/A',
                         'sr_level': 'N/A',
                         'ote_zone': 'N/A'
@@ -399,7 +379,7 @@ def main():
                         'sl': sl,
                         'tp': tp,
                         'invalidation': invalidation,
-                        'strategy': f'Ichimoku + H4 + M15 ({signal})',
+                        'strategy': f'Ichimoku + H1 + M15 ({signal})',
                         'fib_level': 'N/A',
                         'sr_level': 'N/A',
                         'ote_zone': 'N/A'
@@ -410,7 +390,7 @@ def main():
                     print(f"❌ Ichimoku ไม่ผ่าน RR/SL (RR={rr:.2f}, SL={sl_dist:.2f}) - ข้าม")
                     setup = None
             else:
-                print("Ichimoku ไม่ผ่าน H4/M15 Trigger")
+                print("Ichimoku ไม่ผ่าน M15 Trigger")
                 setup = None
         else:
             print("ไม่มีสัญญาณ Ichimoku")
@@ -418,7 +398,7 @@ def main():
     # ===== 3. ถ้ายังไม่มี setup → Silver Bullet =====
     if setup is None:
         print("🔍 กำลังหา Silver Bullet...")
-        setup = silver_bullet_signal(df_h4, df_h1, df_m15)
+        setup = silver_bullet_signal(df_h1, df_m15)
         if setup:
             rr = calculate_rr(setup)
             sl_dist = abs(setup['entry'] - setup['sl'])
