@@ -16,7 +16,7 @@ TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY')
 STATE_FILE = "pending_orders.json"
 MAX_AGE_HOURS = 12
 MIN_RR = 1.67
-MIN_SL_DISTANCE = 2.0
+MIN_SL_DISTANCE = 1.5   # ปรับจาก 2.0 เป็น 1.5
 
 TIMEFRAME_MAIN = "1h"
 TIMEFRAME_REFINE = "15min"
@@ -367,11 +367,8 @@ def breakout_retest_signal(df_h1, df_m15):
 
     if trend == 'bullish':
         last_high_idx, last_high_price = swings_high[-1]
-        # ราคาเบรก high
         if current_price > last_high_price:
-            # รอ retest กลับมาใกล้ last_high
             if abs(current_price - last_high_price) <= atr_m15 * 0.5:
-                # ตรวจ M15 แท่งกลับตัว
                 last3 = df_m15.tail(3)
                 bullish_pa = (
                     last3['Close'].iloc[-1] > last3['Open'].iloc[-1] and
@@ -379,7 +376,7 @@ def breakout_retest_signal(df_h1, df_m15):
                 )
                 if bullish_pa:
                     entry = current_price
-                    sl = swings_low[-1][1] - 0.5  # swing low ล่าสุด
+                    sl = swings_low[-1][1] - 0.5
                     invalidation = sl
                     if entry - sl < MIN_SL_DISTANCE:
                         return None
@@ -426,11 +423,92 @@ def breakout_retest_signal(df_h1, df_m15):
 
     return setup
 
+def ema_pullback_signal(df_h1, df_m15):
+    """กลยุทธ์ EMA Pullback บน M15 โดยใช้ H1 เทรนด์จาก Ichimoku"""
+    if df_h1 is None or df_h1.empty or df_m15 is None or df_m15.empty:
+        return None
+
+    # ใช้ H1 Ichimoku กำหนดแนวโน้ม
+    trend = detect_trend_ichimoku_h1(df_h1)
+    if trend not in ['bullish', 'bearish']:
+        return None
+
+    # คำนวณ EMA บน M15
+    ema20 = df_m15['Close'].ewm(span=20, adjust=False).mean()
+    ema50 = df_m15['Close'].ewm(span=50, adjust=False).mean()
+
+    current_price = df_m15['Close'].iloc[-1]
+    atr_m15 = calculate_atr(df_m15, period=14)
+
+    swings_high, swings_low = find_swings(df_m15, window=3)
+    if not swings_high or not swings_low:
+        return None
+
+    setup = None
+
+    if trend == 'bullish':
+        # ต้องอยู่เหนือ EMA20 และ EMA50 และ EMA20 > EMA50 (ขาขึ้น)
+        if current_price > ema20.iloc[-1] and current_price > ema50.iloc[-1] and ema20.iloc[-1] > ema50.iloc[-1]:
+            # รอราคาย่อลงมาใกล้ EMA20
+            if abs(current_price - ema20.iloc[-1]) <= atr_m15 * 0.5:
+                last3 = df_m15.tail(3)
+                bullish_pa = (
+                    last3['Close'].iloc[-1] > last3['Open'].iloc[-1] and
+                    last3['Low'].iloc[-1] < last3['Low'].iloc[-2]
+                )
+                if bullish_pa:
+                    entry = current_price
+                    sl = swings_low[-1][1] - 0.5
+                    invalidation = sl
+                    if entry - sl < MIN_SL_DISTANCE:
+                        return None
+                    tp = entry + MIN_RR * (entry - sl)
+                    setup = {
+                        'type': 'BUY_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'EMA Pullback + M15 PA (Bullish)',
+                        'fib_level': 'N/A',
+                        'sr_level': f'EMA20 @ {ema20.iloc[-1]:.2f}',
+                        'ote_zone': 'N/A'
+                    }
+
+    elif trend == 'bearish':
+        if current_price < ema20.iloc[-1] and current_price < ema50.iloc[-1] and ema20.iloc[-1] < ema50.iloc[-1]:
+            if abs(current_price - ema20.iloc[-1]) <= atr_m15 * 0.5:
+                last3 = df_m15.tail(3)
+                bearish_pa = (
+                    last3['Close'].iloc[-1] < last3['Open'].iloc[-1] and
+                    last3['High'].iloc[-1] > last3['High'].iloc[-2]
+                )
+                if bearish_pa:
+                    entry = current_price
+                    sl = swings_high[-1][1] + 0.5
+                    invalidation = sl
+                    if sl - entry < MIN_SL_DISTANCE:
+                        return None
+                    tp = entry - MIN_RR * (sl - entry)
+                    setup = {
+                        'type': 'SELL_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'EMA Pullback + M15 PA (Bearish)',
+                        'fib_level': 'N/A',
+                        'sr_level': f'EMA20 @ {ema20.iloc[-1]:.2f}',
+                        'ote_zone': 'N/A'
+                    }
+
+    return setup
+
 def send_running_status():
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     msg = (f"🔄 ระบบกำลังทำงาน\n"
            f"เวลาไทย: {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet+Pullback+Breakout\n"
+           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet+Pullback+Breakout+EMA\n"
            f"Timeframe: {TIMEFRAME_MAIN}/{TIMEFRAME_REFINE}\n"
            f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"รอบ: ทุก 15 นาที")
@@ -441,7 +519,7 @@ def send_morning_status():
     msg = (f"☀️ ระบบ Gold Signal ทำงานปกติ\n"
            f"วันที่: {now.strftime('%d/%m/%Y')}\n"
            f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback + Breakout\n"
+           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback + Breakout + EMA\n"
            f"Timeframe: {TIMEFRAME_MAIN} + {TIMEFRAME_REFINE}\n"
            f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"--------------------------------\n"
@@ -585,7 +663,7 @@ def main():
                 print(f"❌ Silver Bullet ไม่ผ่าน RR/SL - ข้าม")
                 setup = None
 
-    # ===== 5. ถ้ายังไม่มี setup → Breakout Retest (ใหม่) =====
+    # ===== 5. ถ้ายังไม่มี setup → Breakout Retest =====
     if setup is None:
         print("🔍 กำลังหา Breakout + Retest...")
         setup = breakout_retest_signal(df_h1, df_m15)
@@ -594,6 +672,17 @@ def main():
             sl_dist = abs(setup['entry'] - setup['sl'])
             if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
                 print(f"❌ Breakout Retest ไม่ผ่าน RR/SL - ข้าม")
+                setup = None
+
+    # ===== 6. ถ้ายังไม่มี setup → EMA Pullback =====
+    if setup is None:
+        print("🔍 กำลังหา EMA Pullback...")
+        setup = ema_pullback_signal(df_h1, df_m15)
+        if setup:
+            rr = calculate_rr(setup)
+            sl_dist = abs(setup['entry'] - setup['sl'])
+            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                print(f"❌ EMA Pullback ไม่ผ่าน RR/SL - ข้าม")
                 setup = None
 
     if setup is None:
