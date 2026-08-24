@@ -1,1 +1,18 @@
-[]
+[
+  {
+    "id": "GOLD_BUY_LIMIT_20260824_1707",
+    "symbol": "XAUUSD",
+    "type": "BUY_LIMIT",
+    "entry": 4647.04,
+    "sl": 4641.59,
+    "tp": 4656.14,
+    "invalidation": 4641.59,
+    "created_time": "2026-08-24T17:07:27.823845+00:00",
+    "expiry_hours": 12,
+    "strategy": "Ichimoku Pullback + M15 PA",
+    "fib_level": "N/A",
+    "sr_level": "N/A",
+    "ote_zone": "N/A",
+    "status": "active"
+  }
+]
