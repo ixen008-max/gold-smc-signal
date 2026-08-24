@@ -264,7 +264,6 @@ def ichimoku_pullback_signal(df_h1, df_m15):
     if df_h1 is None or df_h1.empty or df_m15 is None or df_m15.empty:
         return None
 
-    # 1. คำนวณ Ichimoku H1
     tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(df_h1)
     price_h1 = df_h1['Close'].iloc[-1]
 
@@ -273,7 +272,6 @@ def ichimoku_pullback_signal(df_h1, df_m15):
     tenkan_above_kijun = tenkan.iloc[-1] > kijun.iloc[-1]
     tenkan_below_kijun = tenkan.iloc[-1] < kijun.iloc[-1]
 
-    # 2. ตรวจสอบ Break Cloud + เส้นยืนยัน
     if above_cloud and tenkan_above_kijun:
         bias = 'bullish'
     elif below_cloud and tenkan_below_kijun:
@@ -281,7 +279,6 @@ def ichimoku_pullback_signal(df_h1, df_m15):
     else:
         return None
 
-    # 3. หา Swing ล่าสุดใน M15 สำหรับ SL และจุดย่อ
     swings_high, swings_low = find_swings(df_m15, window=3)
     if not swings_high or not swings_low:
         return None
@@ -289,16 +286,13 @@ def ichimoku_pullback_signal(df_h1, df_m15):
     current_price = df_m15['Close'].iloc[-1]
     atr_m15 = calculate_atr(df_m15, period=14)
 
-    # โซนย่อ: ใช้ช่วงระหว่าง Tenkan ถึง Kijun บน H1
     pullback_zone_top = max(tenkan.iloc[-1], kijun.iloc[-1])
     pullback_zone_bottom = min(tenkan.iloc[-1], kijun.iloc[-1])
 
     setup = None
 
     if bias == 'bullish':
-        # ราคาต้องย่อลงมาใกล้โซน Tenkan/Kijun
         if current_price > pullback_zone_bottom and current_price <= pullback_zone_top + atr_m15:
-            # ตรวจ M15 Price Action: 3 แท่งล่าสุดต้องกลับตัว
             last3 = df_m15.tail(3)
             bullish_pa = (
                 last3['Close'].iloc[-1] > last3['Open'].iloc[-1] and
@@ -351,11 +345,92 @@ def ichimoku_pullback_signal(df_h1, df_m15):
 
     return setup
 
+def breakout_retest_signal(df_h1, df_m15):
+    """
+    กลยุทธ์ M15 Breakout + Retest (ไม่ต้องรอ Killzone)
+    ใช้ H1 Ichimoku Trend เป็นตัวกรองทิศทาง
+    """
+    if df_h1 is None or df_h1.empty or df_m15 is None or df_m15.empty:
+        return None
+
+    trend = detect_trend_ichimoku_h1(df_h1)
+    if trend not in ['bullish', 'bearish']:
+        return None
+
+    swings_high, swings_low = find_swings(df_m15, window=3)
+    if not swings_high or not swings_low:
+        return None
+
+    current_price = df_m15['Close'].iloc[-1]
+    atr_m15 = calculate_atr(df_m15, period=14)
+    setup = None
+
+    if trend == 'bullish':
+        last_high_idx, last_high_price = swings_high[-1]
+        # ราคาเบรก high
+        if current_price > last_high_price:
+            # รอ retest กลับมาใกล้ last_high
+            if abs(current_price - last_high_price) <= atr_m15 * 0.5:
+                # ตรวจ M15 แท่งกลับตัว
+                last3 = df_m15.tail(3)
+                bullish_pa = (
+                    last3['Close'].iloc[-1] > last3['Open'].iloc[-1] and
+                    last3['Low'].iloc[-1] < last3['Low'].iloc[-2]
+                )
+                if bullish_pa:
+                    entry = current_price
+                    sl = swings_low[-1][1] - 0.5  # swing low ล่าสุด
+                    invalidation = sl
+                    if entry - sl < MIN_SL_DISTANCE:
+                        return None
+                    tp = entry + MIN_RR * (entry - sl)
+                    setup = {
+                        'type': 'BUY_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'M15 Breakout + Retest (Bullish)',
+                        'fib_level': 'N/A',
+                        'sr_level': f'Breakout @ {last_high_price:.2f}',
+                        'ote_zone': 'N/A'
+                    }
+
+    elif trend == 'bearish':
+        last_low_idx, last_low_price = swings_low[-1]
+        if current_price < last_low_price:
+            if abs(current_price - last_low_price) <= atr_m15 * 0.5:
+                last3 = df_m15.tail(3)
+                bearish_pa = (
+                    last3['Close'].iloc[-1] < last3['Open'].iloc[-1] and
+                    last3['High'].iloc[-1] > last3['High'].iloc[-2]
+                )
+                if bearish_pa:
+                    entry = current_price
+                    sl = swings_high[-1][1] + 0.5
+                    invalidation = sl
+                    if sl - entry < MIN_SL_DISTANCE:
+                        return None
+                    tp = entry - MIN_RR * (sl - entry)
+                    setup = {
+                        'type': 'SELL_LIMIT',
+                        'entry': entry,
+                        'sl': sl,
+                        'tp': tp,
+                        'invalidation': invalidation,
+                        'strategy': 'M15 Breakout + Retest (Bearish)',
+                        'fib_level': 'N/A',
+                        'sr_level': f'Breakout @ {last_low_price:.2f}',
+                        'ote_zone': 'N/A'
+                    }
+
+    return setup
+
 def send_running_status():
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     msg = (f"🔄 ระบบกำลังทำงาน\n"
            f"เวลาไทย: {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet+Pullback\n"
+           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet+Pullback+Breakout\n"
            f"Timeframe: {TIMEFRAME_MAIN}/{TIMEFRAME_REFINE}\n"
            f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"รอบ: ทุก 15 นาที")
@@ -366,7 +441,7 @@ def send_morning_status():
     msg = (f"☀️ ระบบ Gold Signal ทำงานปกติ\n"
            f"วันที่: {now.strftime('%d/%m/%Y')}\n"
            f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback\n"
+           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback + Breakout\n"
            f"Timeframe: {TIMEFRAME_MAIN} + {TIMEFRAME_REFINE}\n"
            f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"--------------------------------\n"
@@ -508,6 +583,17 @@ def main():
             sl_dist = abs(setup['entry'] - setup['sl'])
             if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
                 print(f"❌ Silver Bullet ไม่ผ่าน RR/SL - ข้าม")
+                setup = None
+
+    # ===== 5. ถ้ายังไม่มี setup → Breakout Retest (ใหม่) =====
+    if setup is None:
+        print("🔍 กำลังหา Breakout + Retest...")
+        setup = breakout_retest_signal(df_h1, df_m15)
+        if setup:
+            rr = calculate_rr(setup)
+            sl_dist = abs(setup['entry'] - setup['sl'])
+            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                print(f"❌ Breakout Retest ไม่ผ่าน RR/SL - ข้าม")
                 setup = None
 
     if setup is None:
