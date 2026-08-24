@@ -259,12 +259,105 @@ def silver_bullet_signal(df_h1, df_m15):
 
     return setup
 
+def ichimoku_pullback_signal(df_h1, df_m15):
+    """กลยุทธ์ Ichimoku Pullback + M15 Price Action"""
+    if df_h1 is None or df_h1.empty or df_m15 is None or df_m15.empty:
+        return None
+
+    # 1. คำนวณ Ichimoku H1
+    tenkan, kijun, senkou_a, senkou_b, chikou = calculate_ichimoku(df_h1)
+    price_h1 = df_h1['Close'].iloc[-1]
+
+    above_cloud = price_h1 > max(senkou_a.iloc[-1], senkou_b.iloc[-1])
+    below_cloud = price_h1 < min(senkou_a.iloc[-1], senkou_b.iloc[-1])
+    tenkan_above_kijun = tenkan.iloc[-1] > kijun.iloc[-1]
+    tenkan_below_kijun = tenkan.iloc[-1] < kijun.iloc[-1]
+
+    # 2. ตรวจสอบ Break Cloud + เส้นยืนยัน
+    if above_cloud and tenkan_above_kijun:
+        bias = 'bullish'
+    elif below_cloud and tenkan_below_kijun:
+        bias = 'bearish'
+    else:
+        return None
+
+    # 3. หา Swing ล่าสุดใน M15 สำหรับ SL และจุดย่อ
+    swings_high, swings_low = find_swings(df_m15, window=3)
+    if not swings_high or not swings_low:
+        return None
+
+    current_price = df_m15['Close'].iloc[-1]
+    atr_m15 = calculate_atr(df_m15, period=14)
+
+    # โซนย่อ: ใช้ช่วงระหว่าง Tenkan ถึง Kijun บน H1
+    pullback_zone_top = max(tenkan.iloc[-1], kijun.iloc[-1])
+    pullback_zone_bottom = min(tenkan.iloc[-1], kijun.iloc[-1])
+
+    setup = None
+
+    if bias == 'bullish':
+        # ราคาต้องย่อลงมาใกล้โซน Tenkan/Kijun
+        if current_price > pullback_zone_bottom and current_price <= pullback_zone_top + atr_m15:
+            # ตรวจ M15 Price Action: 3 แท่งล่าสุดต้องกลับตัว
+            last3 = df_m15.tail(3)
+            bullish_pa = (
+                last3['Close'].iloc[-1] > last3['Open'].iloc[-1] and
+                last3['Low'].iloc[-1] < last3['Low'].iloc[-2]
+            )
+            if bullish_pa:
+                entry = current_price
+                sl = swings_low[-1][1] - 0.5
+                invalidation = sl
+                if entry - sl < MIN_SL_DISTANCE:
+                    return None
+                tp = entry + MIN_RR * (entry - sl)
+                setup = {
+                    'type': 'BUY_LIMIT',
+                    'entry': entry,
+                    'sl': sl,
+                    'tp': tp,
+                    'invalidation': invalidation,
+                    'strategy': 'Ichimoku Pullback + M15 PA',
+                    'fib_level': 'N/A',
+                    'sr_level': 'N/A',
+                    'ote_zone': 'N/A'
+                }
+
+    elif bias == 'bearish':
+        if current_price < pullback_zone_top and current_price >= pullback_zone_bottom - atr_m15:
+            last3 = df_m15.tail(3)
+            bearish_pa = (
+                last3['Close'].iloc[-1] < last3['Open'].iloc[-1] and
+                last3['High'].iloc[-1] > last3['High'].iloc[-2]
+            )
+            if bearish_pa:
+                entry = current_price
+                sl = swings_high[-1][1] + 0.5
+                invalidation = sl
+                if sl - entry < MIN_SL_DISTANCE:
+                    return None
+                tp = entry - MIN_RR * (sl - entry)
+                setup = {
+                    'type': 'SELL_LIMIT',
+                    'entry': entry,
+                    'sl': sl,
+                    'tp': tp,
+                    'invalidation': invalidation,
+                    'strategy': 'Ichimoku Pullback + M15 PA',
+                    'fib_level': 'N/A',
+                    'sr_level': 'N/A',
+                    'ote_zone': 'N/A'
+                }
+
+    return setup
+
 def send_running_status():
     now = datetime.now(timezone.utc) + timedelta(hours=7)
     msg = (f"🔄 ระบบกำลังทำงาน\n"
            f"เวลาไทย: {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet (1h/15m)\n"
-           f"RR ขั้นต่ำ: 1.67\n"
+           f"กลยุทธ์: SMC+Ichimoku+Silver Bullet+Pullback\n"
+           f"Timeframe: {TIMEFRAME_MAIN}/{TIMEFRAME_REFINE}\n"
+           f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"รอบ: ทุก 15 นาที")
     send_line_message(msg)
 
@@ -273,9 +366,9 @@ def send_morning_status():
     msg = (f"☀️ ระบบ Gold Signal ทำงานปกติ\n"
            f"วันที่: {now.strftime('%d/%m/%Y')}\n"
            f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
-           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet\n"
-           f"Timeframe: 1h + 15m\n"
-           f"RR ขั้นต่ำ: 1.67\n"
+           f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback\n"
+           f"Timeframe: {TIMEFRAME_MAIN} + {TIMEFRAME_REFINE}\n"
+           f"RR ขั้นต่ำ: {MIN_RR}\n"
            f"--------------------------------\n"
            f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
     send_line_message(msg)
@@ -345,7 +438,7 @@ def main():
         else:
             setup = refine_entry_with_m15(setup, df_m15)
 
-    # ===== 2. ถ้า SMC ไม่พบ ลอง Ichimoku =====
+    # ===== 2. ถ้า SMC ไม่พบ ลอง Ichimoku แบบเดิม =====
     if setup is None:
         print("🔍 กำลังหา Ichimoku...")
         signal = get_ichimoku_signal(df_h1)
@@ -395,7 +488,18 @@ def main():
         else:
             print("ไม่มีสัญญาณ Ichimoku")
 
-    # ===== 3. ถ้ายังไม่มี setup → Silver Bullet =====
+    # ===== 3. ถ้ายังไม่มี setup → Ichimoku Pullback =====
+    if setup is None:
+        print("🔍 กำลังหา Ichimoku Pullback...")
+        setup = ichimoku_pullback_signal(df_h1, df_m15)
+        if setup:
+            rr = calculate_rr(setup)
+            sl_dist = abs(setup['entry'] - setup['sl'])
+            if rr < MIN_RR or sl_dist < MIN_SL_DISTANCE:
+                print(f"❌ Ichimoku Pullback ไม่ผ่าน RR/SL - ข้าม")
+                setup = None
+
+    # ===== 4. ถ้ายังไม่มี setup → Silver Bullet =====
     if setup is None:
         print("🔍 กำลังหา Silver Bullet...")
         setup = silver_bullet_signal(df_h1, df_m15)
