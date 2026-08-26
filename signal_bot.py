@@ -15,8 +15,8 @@ TWELVEDATA_API_KEY = os.environ.get('TWELVEDATA_API_KEY')
 
 STATE_FILE = "pending_orders.json"
 MAX_AGE_HOURS = 12
-MIN_RR = 1.67
-MIN_SL_DISTANCE = 1.5   # ปรับจาก 2.0 เป็น 1.5
+MIN_RR = 1.5          # ขั้นต่ำที่รับได้
+MIN_SL_DISTANCE = 1.5 # ระยะ SL ขั้นต่ำ
 
 TIMEFRAME_MAIN = "1h"
 TIMEFRAME_REFINE = "15min"
@@ -521,7 +521,7 @@ def send_morning_status():
            f"เวลา (ไทย): {now.strftime('%H:%M')} น.\n"
            f"กลยุทธ์: SMC + Ichimoku + Silver Bullet + Pullback + Breakout + EMA\n"
            f"Timeframe: {TIMEFRAME_MAIN} + {TIMEFRAME_REFINE}\n"
-           f"RR ขั้นต่ำ: {MIN_RR}\n"
+           f"RR ขั้นต่ำ: {MIN_RR} (รับ 1.5 ขึ้นไป)\n"
            f"--------------------------------\n"
            f"จะแจ้งเตือนเมื่อพบ Setup ตามเงื่อนไข")
     send_line_message(msg)
@@ -699,6 +699,14 @@ def main():
         print("มี pending ใกล้เคียงอยู่แล้ว")
         return
 
+    # ===== กำหนด Rating ตาม RR =====
+    if rr >= 2.0:
+        rating = "🔥 A+ Setup"
+    elif rr >= 1.67:
+        rating = "⭐ Strong Setup"
+    else:
+        rating = "Setup"
+
     # บันทึก pending
     order_id = f"GOLD_{setup['type']}_{now_utc.strftime('%Y%m%d_%H%M')}"
     order = {
@@ -715,13 +723,14 @@ def main():
         "fib_level": setup.get('fib_level', 'N/A'),
         "sr_level": setup.get('sr_level', 'N/A'),
         "ote_zone": setup.get('ote_zone', 'N/A'),
+        "rating": rating,
         "status": "active"
     }
     pending.append(order)
     save_state(pending)
 
     rr_str = f"{rr:.2f}"
-    msg = (f"📊 GOLD SIGNAL\n"
+    msg = (f"📊 GOLD SIGNAL ({rating})\n"
            f"Direction: {order['type']}\n"
            f"Entry: {order['entry']}\n"
            f"SL: {order['sl']}\n"
