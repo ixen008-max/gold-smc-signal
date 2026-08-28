@@ -4,7 +4,7 @@ on:
   schedule:
     # รันทุก 15 นาที เฉพาะวันจันทร์-ศุกร์
     - cron: '*/15 * * * 1-5'
-    # แจ้งเตือน 7 โมงเช้าไทย (00:00 UTC) วันจันทร์-ศุกร์
+    # ส่งข้อความตอน 7 โมงเช้าไทย (00:00 UTC) วันจันทร์-ศุกร์
     - cron: '0 0 * * 1-5'
   workflow_dispatch:
 
@@ -19,12 +19,11 @@ jobs:
           python-version: '3.11'
       - name: Install dependencies
         run: pip install -r requirements.txt
-      - name: Run Gold SMC+Ichimoku Signal
+      - name: Run Gold Signal Bot
         env:
           LINE_CHANNEL_ACCESS_TOKEN: ${{ secrets.LINE_CHANNEL_ACCESS_TOKEN }}
           LINE_USER_ID: ${{ secrets.LINE_USER_ID }}
           TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
-          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
         run: python signal_bot.py
       - name: Commit gold state
         run: |
