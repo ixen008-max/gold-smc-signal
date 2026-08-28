@@ -2,8 +2,9 @@ name: Gold SMC Signal
 
 on:
   schedule:
-    - cron: '0 * * * *'   # รันทุก ๆ 1 ชั่วโมง (ทุกต้นชั่วโมง UTC)
-  workflow_dispatch:       # เพิ่มปุ่ม Run เองได้
+    - cron: '*/15 * * * 1-5'
+    - cron: '0 0 * * 1-5'
+  workflow_dispatch:
 
 jobs:
   run:
